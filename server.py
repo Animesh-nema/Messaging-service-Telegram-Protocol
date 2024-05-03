@@ -1,6 +1,7 @@
 from flask import Flask,request
 from dh_config import get_fixed_dh_parameters
 from flask_socketio import SocketIO, emit
+import threading
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
@@ -11,7 +12,8 @@ import os
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(16)
-socketio = SocketIO(app)
+socketio = SocketIO(app, async_mode='threading')
+message_count = 0
 
 parameters = get_fixed_dh_parameters()
 client_data = {}
@@ -45,28 +47,54 @@ def generate_shared_secret(private_key, peer_public_key):
     ).derive(shared_key)
     return derived_key, salt
 
+def regenerate_keys(session_id):
+    if session_id in client_data:
+        data = client_data[session_id]
+        private_key = generate_private_key()
+        peer_public_key = data['peer_public_key']
+        if peer_public_key:
+            shared_secret, salt = generate_shared_secret(private_key, peer_public_key)
+            client_data[session_id].update({
+                'private_key': private_key,
+                'shared_secret': shared_secret,
+                'salt': salt
+            })
+            # Use socketio.emit to correctly send messages from outside Flask's context
+            socketio.emit('exchange_complete', {
+                'key': shared_secret.hex(),
+                'salt': salt.hex(),
+                'session_id': session_id
+            },broadcast=True)
+            # Reschedule the timer
+            # timer = threading.Timer(20, regenerate_keys, [session_id])
+            # timer.start()
+
 @socketio.on('client_hello')
 def handle_client_hello(data):
     client_id = data['client_id']
     private_key = generate_private_key()
     public_key = get_public_key(private_key)
     session_id = request.sid
-    client_data[session_id] = {'private_key': private_key, 'client_id': client_id}
+    client_data[session_id] = {'private_key': private_key, 'client_id': client_id,'peer_public_key': None }
     emit('server_hello', {'public_key': serialize_public_key(public_key)})
 
 @socketio.on('client_exchange')
 def handle_client_exchange(data):
-    print("coming here")
     session_id = request.sid
     private_key = client_data[session_id]['private_key']
     peer_public_key = deserialize_public_key(data['peer_public_key'])
     shared_secret,salt = generate_shared_secret(private_key, peer_public_key)
     client_data[session_id]['shared_secret'] = shared_secret
     client_data[session_id]['salt'] = salt 
+    client_data[session_id]['peer_public_key'] = peer_public_key 
     emit('exchange_complete', {'key': shared_secret.hex(), 'salt': salt.hex(), 'session_id': session_id},broadcast=True)
+    # timer = threading.Timer(20, regenerate_keys, [session_id])
+    # timer.start()
+
 
 @socketio.on('send_message')
 def handle_send_message(data):
+    global message_count
     session_id = request.sid
     recipient_id = data['client_id']
     print(recipient_id,"recipient_id")
@@ -75,9 +103,14 @@ def handle_send_message(data):
         for client_id in client_data:
             if client_id != session_id:
                 print("Sending message to:", client_id)
+                message_count += 1
                 emit('receive_message', {'message': data['message']}, room=client_id)
     else:
         print("Recipient not connected.")
+    if message_count == 4:
+        message_count = 0
+        regenerate_keys(session_id)
+        # timer.start()
 
 @socketio.on('disconnect')
 def handle_disconnect():
