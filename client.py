@@ -1,12 +1,16 @@
 import socketio
 import tgcrypto
 import uuid
+import tkinter as tk
+from tkinter import scrolledtext
+from threading import Thread
 
 from dh_config import get_fixed_dh_parameters
 from hashlib import sha256, sha1
 from cryptography.hazmat.primitives import serialization
 from Crypto.Util.Padding import unpad, pad
 
+# SocketIO setup
 sio = socketio.Client()
 server_url = 'http://127.0.0.1:5001'
 client_id = str(uuid.uuid4())
@@ -16,7 +20,11 @@ salt = None
 
 parameters = get_fixed_dh_parameters()
 private_key = parameters.generate_private_key()
- 
+
+def connect_to_server():
+    sio.connect(server_url)
+    sio.wait()
+
 def encrypt_inner_layer(shared_secret, message):
     # MTProto 2.0 part II Encryption
     message_bytes = message if isinstance(message, bytes) else message.encode('utf-8')
@@ -28,7 +36,6 @@ def encrypt_inner_layer(shared_secret, message):
     encrypted_data = tgcrypto.ige256_encrypt(padded_payload, aes_key, aes_ige_iv)
     encrypted_message = msg_key + encrypted_data
     return encrypted_message
-
 def encrypt_outer_message(shared_secret, message, server_salt, session_id):
     # MTProto 2.0 part I Encryption
     auth_key_id = sha1(shared_secret).digest()[:8]
@@ -117,9 +124,36 @@ def decrypt_message(encrypted_payload):
 
     return decrypted_inner_unpadded.decode('utf-8')
 
+
+window = tk.Tk()
+window.title("MTProto Client")
+
+messages_frame = scrolledtext.ScrolledText(window, height=10)
+messages_frame.pack(padx=20, pady=10)
+
+message_field = tk.Entry(window, width=50)
+message_field.pack(padx=20, pady=(0, 10))
+
+send_button = tk.Button(window, text="Send", command=lambda: send_message(message_field.get()))
+send_button.pack(pady=(0, 20))
+
+def send_message(message):
+    if message.lower() == 'exit':
+        sio.disconnect()
+        window.quit()
+    encrypted_message = send_encrypted_message(message)
+    sio.emit('send_message', {'client_id': client_id, 'message': encrypted_message})
+    message_field.delete(0, tk.END)
+
+def update_messages(message):
+    messages_frame.config(state=tk.NORMAL)
+    messages_frame.insert(tk.END, message + "\\n")
+    messages_frame.yview(tk.END)
+    messages_frame.config(state=tk.DISABLED)
+
 @sio.event
 def connect():
-    print('Connected to server.')
+    update_messages('Connected to server.')
     sio.emit('client_hello', {'client_id': client_id})
 
 @sio.on('server_hello')
@@ -133,31 +167,23 @@ def on_server_hello(data):
 
 @sio.on('exchange_complete')
 def on_exchange_complete(data):
-    global shared_secret, salt,session_id
+    global shared_secret, salt, session_id
     session_id = data['session_id']
     shared_secret = bytes.fromhex(data['key'])
     salt = bytes.fromhex(data['salt'])
-    print('Exchange complete, ready to send and receive encrypted messages.')
+    update_messages('Exchange complete, ready to send and receive encrypted messages.')
 
 @sio.on('receive_message')
 def on_receive_message(data):
     encrypted_message = data['message']
-    decrypt = decrypt_message(encrypted_message)
-    print(decrypt,"decrypt_message")
-    return
+    decrypted_message = decrypt_message(encrypted_message)
+    update_messages('Received: ' + decrypted_message)
 
 @sio.event
 def disconnect():
-    print('Disconnected from server.')
+    update_messages('Disconnected from server.')
 
 if __name__ == '__main__':
-    try:
-        sio.connect(server_url)
-        while True:
-            message = input('Enter a message ("exit" to quit): ')
-            if message.lower() == 'exit':
-                break
-            encrypted_message = send_encrypted_message(message)
-            sio.emit('send_message', {'client_id': client_id, 'message': encrypted_message})
-    finally:
-        sio.disconnect()
+    socket_thread = Thread(target=connect_to_server)
+    socket_thread.start()
+    window.mainloop()
