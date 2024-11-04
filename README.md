@@ -59,7 +59,3 @@ pip install -r requirements.txt
 
 - Ensure the server supports the MTProto 2.0 protocol.
 - The `dh_config.py` file should define the Diffie-Hellman parameters to be used for key exchange.
-
-## License
-
-This project is open-source and available under the MIT License.
